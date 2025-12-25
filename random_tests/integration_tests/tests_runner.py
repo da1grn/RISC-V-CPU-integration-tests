@@ -235,93 +235,6 @@ def gen_memory_walk(count=30):
         tests.append({"name": f"Mem_Walk_{test_id+1}", "asm": "\n".join(asm), "checks": checks})
     return tests
 
-# ... (Memory Walk etc unchanged)
-
-# --- Main Runner ---
-
-test_cases = []
-# Generate MORE ALU tests since they are now single-shot
-print("Generating ALU Chaos tests...")
-test_cases.extend(gen_alu_chaos(100)) 
-# ... (rest unchanged)
-
-def run_test(test):
-    # ... (write/assemble/run unchanged)
-            
-    # 5. Check Expectations
-    failed = False
-    for k, v in test["checks"].items():
-        # ... (check logic unchanged)
-        
-        if actual_u != expect_u:
-            print(f"[{test['name']}] Failed {k}:")
-            print(f"   Expected: {expect_u} (0x{expect_u:08X})")
-            print(f"   Got:      {actual_u} (0x{actual_u:08X})")
-            failed = True
-            
-    if failed:
-        print(f"\n--- FAILED ASM [{test['name']}] ---")
-        print(test['asm'])
-        print("-----------------------------------\n")
-
-    return not failed
-    """
-    Simulates a pointer moving around memory.
-    Constrained only by physical memory array size (0..2048 words).
-    """
-    tests = []
-    for test_id in range(count):
-        sim = ReferenceCPU()
-        asm = []
-        
-        ptr_reg = 1 
-        data_reg = 2 
-        
-        # Start in middle of memory to allow neg offsets
-        current_ptr = 1000 
-        sim.execute('addi', ptr_reg, 0, imm=current_ptr)
-        asm.append(f"addi x{ptr_reg}, x0, {current_ptr}")
-        
-        for _ in range(40):
-            action = random.choice(['write', 'read', 'move'])
-            
-            if action == 'move':
-                move_amt = random.randint(-50, 50) * 4
-                # Check bounds (Verilog memory is usually 0..8192 bytes roughly)
-                if 0 <= current_ptr + move_amt < 2000:
-                    current_ptr += move_amt
-                    sim.execute('addi', ptr_reg, ptr_reg, imm=move_amt)
-                    asm.append(f"addi x{ptr_reg}, x{ptr_reg}, {move_amt}")
-                continue
-
-            offset = random.randint(-100, 100) * 4
-            addr = (current_ptr + offset) & 0xFFFFFFFF
-            
-            # Valid memory range check
-            if not (0 <= addr < 2040): 
-                continue
-                
-            if action == 'write':
-                val = random_imm12() 
-                sim.execute('addi', data_reg, 0, imm=val)
-                asm.append(f"addi x{data_reg}, x0, {val}")
-                
-                sim.execute('sw', 0, ptr_reg, data_reg, imm=offset)
-                asm.append(f"sw x{data_reg}, {offset}(x{ptr_reg})")
-                
-            elif action == 'read':
-                dest = random.randint(3, 31)
-                sim.execute('lw', dest, ptr_reg, imm=offset)
-                asm.append(f"lw x{dest}, {offset}(x{ptr_reg})")
-
-        checks = {f"x{r}": sim.get_reg(r) for r in range(32) if sim.get_reg(r) != 0}
-        # Check touched memory
-        for addr, val in list(sim.mem.items())[:25]:
-             checks[f"mem[{addr}]"] = val
-            
-        tests.append({"name": f"Mem_Walk_{test_id+1}", "asm": "\n".join(asm), "checks": checks})
-    return tests
-
 def gen_branch_maze(count=30):
     """
     Branching logic test. Restored to full complexity.
@@ -404,17 +317,99 @@ def gen_jal_pingpong(count=10):
         tests.append({"name": f"PingPong_{test_id+1}", "asm": "\n".join(asm), "checks": {"x10": sim.get_reg(10)}})
     return tests
 
+def gen_loops(count=20):
+    """
+    Tests backward branching and loop execution.
+    """
+    tests = []
+    for test_id in range(count):
+        sim = ReferenceCPU()
+        asm = []
+        
+        # Loop counter 5..10
+        loop_cnt = random.randint(5, 10)
+        cnt_reg = 5
+        acc_reg = 6
+        
+        sim.execute('addi', cnt_reg, 0, imm=loop_cnt)
+        sim.execute('addi', acc_reg, 0, imm=0)
+        
+        asm.append(f"addi x{cnt_reg}, x0, {loop_cnt}")
+        asm.append(f"addi x{acc_reg}, x0, 0")
+        asm.append("loop_start:")
+        
+        # Loop body: acc += 2, cnt -= 1
+        asm.append(f"addi x{acc_reg}, x{acc_reg}, 2")
+        asm.append(f"addi x{cnt_reg}, x{cnt_reg}, -1")
+        
+        # Simulate loop effect
+        for _ in range(loop_cnt):
+            sim.execute('addi', acc_reg, acc_reg, imm=2)
+            sim.execute('addi', cnt_reg, cnt_reg, imm=-1)
+            
+        asm.append(f"bne x{cnt_reg}, x0, loop_start")
+        
+        tests.append({"name": f"Loop_{test_id+1}", "asm": "\n".join(asm), "checks": {f"x{acc_reg}": sim.get_reg(acc_reg), f"x{cnt_reg}": 0}})
+    return tests
+
+def gen_call_ret(count=20):
+    """
+    Tests function calls using JAL (call) and JALR (return).
+    """
+    tests = []
+    for test_id in range(count):
+        sim = ReferenceCPU()
+        asm = []
+        
+        arg_reg = 10
+        ret_reg = 11
+        
+        # Setup argument
+        arg_val = random_imm12()
+        sim.execute('addi', arg_reg, 0, imm=arg_val)
+        asm.append(f"addi x{arg_reg}, x0, {arg_val}")
+        
+        # Call function
+        # JAL ra, func_target
+        asm.append("jal x1, func_target")
+        
+        # Simulation: The function adds 10 to arg and puts in ret
+        sim.execute('addi', ret_reg, arg_reg, imm=10)
+        
+        # Main continues here
+        asm.append("main_cont:")
+        # We might do something else to prove we returned
+        sim.execute('addi', ret_reg, ret_reg, imm=1)
+        asm.append(f"addi x{ret_reg}, x{ret_reg}, 1")
+        asm.append("jal x0, end_test")
+        
+        # Function definition
+        asm.append("func_target:")
+        asm.append(f"addi x{ret_reg}, x{arg_reg}, 10")
+        # Return: jalr x0, x1, 0
+        asm.append("jalr x0, x1, 0")
+        
+        asm.append("end_test:")
+        
+        # We don't check x1 (ra) because we can't predict PC easily
+        tests.append({"name": f"CallRet_{test_id+1}", "asm": "\n".join(asm), "checks": {f"x{ret_reg}": sim.get_reg(ret_reg)}})
+    return tests
+
 # --- Main Runner ---
 
 test_cases = []
 print("Generating ALU Chaos tests...")
-test_cases.extend(gen_alu_chaos(30))
+test_cases.extend(gen_alu_chaos(100))
 print("Generating Memory Walk tests...")
-test_cases.extend(gen_memory_walk(30))
+test_cases.extend(gen_memory_walk(100))
 print("Generating Branch Maze tests...")
-test_cases.extend(gen_branch_maze(30))
+test_cases.extend(gen_branch_maze(100))
 print("Generating Jump PingPong tests...")
-test_cases.extend(gen_jal_pingpong(10))
+test_cases.extend(gen_jal_pingpong(50))
+print("Generating Loop tests...")
+test_cases.extend(gen_loops(50))
+print("Generating Call/Ret tests...")
+test_cases.extend(gen_call_ret(50))
 
 def run_test(test):
     with open(TEMP_ASM_FILE, "w") as f:
@@ -447,27 +442,37 @@ def run_test(test):
         if m:
             mem[f"mem[{m.group(1)}]"] = int(m.group(2))
             
-    failed = False
+    failures = []
     for k, v in test["checks"].items():
         actual = 0
         if k in regs: actual = regs[k]
         elif k in mem: actual = mem[k]
         else:
             if v == 0: continue
-            print(f"[{test['name']}] Missing check key: {k} (Expected {v})")
-            failed = True
+            failures.append(f"[{test['name']}] Missing check key: {k} (Expected {v})")
             continue
             
         actual_u = actual & 0xFFFFFFFF
         expect_u = v & 0xFFFFFFFF
         
         if actual_u != expect_u:
-            print(f"[{test['name']}] Failed {k}:")
-            print(f"   Expected: {expect_u} (0x{expect_u:08X})")
-            print(f"   Got:      {actual_u} (0x{actual_u:08X})")
-            failed = True
+            failures.append(f"[{test['name']}] Failed {k}: Expected {expect_u} (0x{expect_u:08X}), Got {actual_u} (0x{actual_u:08X})")
             
-    return not failed
+    if failures:
+        print(f"\n========================================================")
+        print(f"ERROR: Test [{test['name']}] FAILED")
+        print(f"========================================================")
+        print("Program Source Code:")
+        print("--------------------------------------------------------")
+        print(test['asm'])
+        print("--------------------------------------------------------")
+        print("Failures:")
+        for fail in failures:
+            print(fail)
+        print("========================================================\n")
+        return False
+
+    return True
 
 def compile_verilog():
     print("Compiling Verilog...")
